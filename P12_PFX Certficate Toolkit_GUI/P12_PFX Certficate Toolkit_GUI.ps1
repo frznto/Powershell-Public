@@ -293,8 +293,8 @@ function Extract-P12Files {
     try {
       # CERT as PEM (text)
       if ($ExtractPEM) {
-        $cmdPEM = "`"$OpenSSLPath`" pkcs12 -in `"$file`" -clcerts -nokeys -out `"$pemPath`" -passin pass:$Password"
-        & cmd /c $cmdPEM 2>$null
+        $passIn = ('pass:{0}' -f $Password)
+        & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $pemPath -passin $passIn 2>$null
         if (Test-Path $pemPath) {
           if ($StripHeaders) {
             if (-not (Keep-OnlyPemEnvelope -Path $pemPath)) {
@@ -326,17 +326,32 @@ function Extract-P12Files {
 
       # CERT as CER (DER/binary)
       if ($ExtractCER) {
-        $cmdCER = "`"$OpenSSLPath`" pkcs12 -in `"$file`" -clcerts -nokeys -passin pass:$Password | `"$OpenSSLPath`" x509 -outform DER -out `"$cerPath`""
-        & cmd /c $cmdCER 2>$null
+        $passIn  = ('pass:{0}' -f $Password)
+        $tempPem = [System.IO.Path]::GetTempFileName() + ".pem"
+        try {
+          & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $tempPem -passin $passIn 2>$null
+
+         if (Test-Path -LiteralPath $tempPem) {
+          & $OpenSSLPath x509 -in $tempPem -outform DER -out $cerPath 2>$null
+         }
+        }
+        finally {
+          if (Test-Path -LiteralPath $tempPem) {
+            Remove-Item -LiteralPath $tempPem -Force -ErrorAction SilentlyContinue
+          }
+        }
         if (Test-Path $cerPath) { $successFlags += "CER" }
       }
 
       # PRIVATE KEY
       if ($ExtractKey) {
         if (-not $EncryptKey) {
-          $cmdKey = "`"$OpenSSLPath`" pkcs12 -in `"$file`" -nocerts -out `"$keyPath`" -nodes -passin pass:$Password"
+          $passIn = ('pass:{0}' -f $Password)
+          & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -nodes -passin $passIn 2>$null
         } else {
-          $cmdKey = "`"$OpenSSLPath`" pkcs12 -in `"$file`" -nocerts -out `"$keyPath`" -passin pass:$Password -passout pass:$Password"
+          $passIn  = ('pass:{0}' -f $Password)
+          $passOut = ('pass:{0}' -f $Password)
+          & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -passin  $passIn -passout $passOut 2>$null
         }
         & cmd /c $cmdKey 2>$null
         if (Test-Path $keyPath) {
