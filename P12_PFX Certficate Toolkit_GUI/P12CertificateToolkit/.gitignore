@@ -1,0 +1,48 @@
+# PowerShell Module .gitignore
+
+# Test files
+*.p12
+*.pfx
+test/
+tests/
+
+# Output folders
+Extracted/
+**/Extracted/
+
+# Log files
+*.log
+*.txt
+Transcript_*.log
+ExtractLog_*.txt
+
+# Temporary files
+*.tmp
+*.temp
+~$*
+
+# Certificate files (safety)
+*.pem
+*.cer
+*.key
+*.crt
+*.der
+
+# IDE files
+.vscode/
+.vs/
+*.code-workspace
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Package files
+*.zip
+*.7z
+*.tar.gz
