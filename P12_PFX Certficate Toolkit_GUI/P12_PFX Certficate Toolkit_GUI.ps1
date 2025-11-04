@@ -3,25 +3,44 @@
   P12/PFX Certificate Toolkit (GUI): extract PEM, CER, and KEY from .p12/.pfx using OpenSSL
   with optional key encryption, header stripping, CA chain append (PEM only),
   dark mode, progress, logs, start/stop, fixed bottom button panel,
-  "Open Extracted Folder" button, and a status bar showing processed counts.
+  "Open Extracted Folder" button, verbose transcript logging, legacy P12 support,
+  and automatic legacy provider detection for portable OpenSSL installations.
 
 .DESCRIPTION
   This GUI application provides a user-friendly interface for extracting certificate
   components from P12/PFX files using OpenSSL. Features include:
   - Multiple output formats (PEM, CER, KEY)
-  - Optional key encryption
+  - Optional key encryption with custom password support
   - CA chain appending for PEM files
   - Dark mode support
-  - Progress tracking and logging
+  - Progress tracking and detailed logging with timestamps
   - Batch processing with stop/resume capability
+  - Verbose transcript logging (optional)
+  - Test Mode: Validate P12 files without extracting
+  - Certificate verification: Verify extracted certificates using OpenSSL
+  - Auto-open transcript when errors occur
+  - Automatic retry with -legacy flag for old P12/PFX files
+  - Auto-detection of OpenSSL legacy provider (legacy.dll)
+  - Automatic -provider-path configuration for portable OpenSSL installations
+  - OpenSSL version detection with warnings for versions < 3.0
+  - CA file PEM format validation
+  - Format validation to ensure successful extraction
 
 .NOTES
   Version:        2.0
-  Author:         Refactored for PowerShell Best Practices
-  Requirements:   OpenSSL must be installed and accessible
-  
+  Author:         Matthew Blakeslee-Hisel
+  Date of Change: 11/3/2025
+  Requirements:   OpenSSL must be either installed or a portable version available
+
   OpenSSL portable link: https://kb.firedaemon.com/support/solutions/articles/4000121705
   Latest version as of 10/27/2025: "OpenSSL 3.6.0 ZIP x86+x64+ARM64"
+  Tested installed version of 3.4 and portable version of 3.6
+
+  Legacy P12 Support:
+  - Automatically detects extraction failures and retries with -legacy flag
+  - Searches for legacy.dll in common locations relative to openssl.exe
+  - Adds -provider-path parameter when legacy provider is found
+  - Works with both full OpenSSL installations and portable versions
 
 .EXAMPLE
   .\P12_PFX_Certificate_Toolkit_GUI.ps1
@@ -225,15 +244,16 @@ function Add-Log {
     )
 
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $timestampedMessage = "[$ts] $Message"
 
     # UI sink (ListBox)
     if (-not $NoUI) {
         try {
             if ($null -ne $script:LogBox) {
-                [void]$script:LogBox.Items.Add($Message)
+                [void]$script:LogBox.Items.Add($timestampedMessage)
                 $script:LogBox.TopIndex = [Math]::Max(0, $script:LogBox.Items.Count - 1)
             }
-        } 
+        }
         catch {
             Write-Verbose "Error adding to LogBox: $_"
         }
@@ -320,10 +340,185 @@ function Limit-PemEnvelope {
 
         $slice | Set-Content -LiteralPath $Path -Encoding ascii
         return $true
-    } 
-    catch { 
+    }
+    catch {
         Write-Verbose "Error limiting PEM envelope: $_"
-        return $false 
+        return $false
+    }
+}
+
+function Get-OpenSSLVersion {
+    <#
+    .SYNOPSIS
+    Gets the OpenSSL version from the specified executable.
+    .OUTPUTS
+    Returns a hashtable with Version (string), Major, Minor, Patch (int), and IsValid (bool)
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OpenSSLPath
+    )
+
+    try {
+        $versionOutput = & $OpenSSLPath version 2>&1 | Out-String
+
+        # Parse version like "OpenSSL 3.0.8 7 Feb 2023" or "OpenSSL 3.6.0 ..."
+        if ($versionOutput -match 'OpenSSL\s+(\d+)\.(\d+)\.(\d+)') {
+            $major = [int]$matches[1]
+            $minor = [int]$matches[2]
+            $patch = [int]$matches[3]
+            $versionString = "$major.$minor.$patch"
+
+            return @{
+                Version = $versionString
+                Major = $major
+                Minor = $minor
+                Patch = $patch
+                IsValid = ($major -ge 3)
+                FullOutput = $versionOutput.Trim()
+            }
+        }
+    }
+    catch {
+        Write-Verbose "Error getting OpenSSL version: $_"
+    }
+
+    return @{
+        Version = "Unknown"
+        Major = 0
+        Minor = 0
+        Patch = 0
+        IsValid = $false
+        FullOutput = "Unknown"
+    }
+}
+
+function Test-PEMFile {
+    <#
+    .SYNOPSIS
+    Validates that a file contains valid PEM format markers.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+
+    try {
+        $content = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        # Check for PEM markers
+        return ($content -match '-----BEGIN [A-Z\s]+-----') -and ($content -match '-----END [A-Z\s]+-----')
+    }
+    catch {
+        Write-Verbose "Error validating PEM file: $_"
+        return $false
+    }
+}
+
+function Test-CertificateFile {
+    <#
+    .SYNOPSIS
+    Verifies an extracted certificate file using OpenSSL.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OpenSSLPath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('PEM', 'CER', 'KEY')]
+        [string]$FileType
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return $false
+    }
+
+    try {
+        switch ($FileType) {
+            'PEM' {
+                # Verify X.509 certificate in PEM format
+                $null = & $OpenSSLPath x509 -in $FilePath -noout -text 2>&1
+                return ($LASTEXITCODE -eq 0)
+            }
+            'CER' {
+                # Verify X.509 certificate in DER format
+                $null = & $OpenSSLPath x509 -in $FilePath -inform DER -noout -text 2>&1
+                return ($LASTEXITCODE -eq 0)
+            }
+            'KEY' {
+                # Verify private key (RSA or other formats)
+                $null = & $OpenSSLPath pkey -in $FilePath -noout -text 2>&1
+                return ($LASTEXITCODE -eq 0)
+            }
+        }
+    }
+    catch {
+        Write-Verbose "Error verifying certificate file: $_"
+        return $false
+    }
+
+    return $false
+}
+
+function Test-P12File {
+    <#
+    .SYNOPSIS
+    Tests if a P12/PFX file is valid and can be read with the given password.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '', Justification='Required for OpenSSL command-line interface')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OpenSSLPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Password,
+
+        [string]$ProviderPath = $null
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return @{ IsValid = $false; Message = "File not found" }
+    }
+
+    try {
+        $passIn = "pass:$Password"
+
+        # Try to list contents without extracting
+        if ($ProviderPath) {
+            $result = & $OpenSSLPath pkcs12 -in $FilePath -passin $passIn -noout -info -provider-path $ProviderPath 2>&1
+        } else {
+            $result = & $OpenSSLPath pkcs12 -in $FilePath -passin $passIn -noout -info 2>&1
+        }
+
+        if ($LASTEXITCODE -eq 0) {
+            return @{ IsValid = $true; Message = "Valid P12 file" }
+        }
+
+        # Try with -legacy flag if first attempt failed
+        if ($ProviderPath) {
+            $result = & $OpenSSLPath pkcs12 -in $FilePath -passin $passIn -noout -info -legacy -provider-path $ProviderPath 2>&1
+        } else {
+            $result = & $OpenSSLPath pkcs12 -in $FilePath -passin $passIn -noout -info -legacy 2>&1
+        }
+
+        if ($LASTEXITCODE -eq 0) {
+            return @{ IsValid = $true; Message = "Valid P12 file (legacy format)" }
+        }
+
+        $errorMsg = $result | Out-String
+        return @{ IsValid = $false; Message = "Invalid P12 file or incorrect password: $errorMsg" }
+    }
+    catch {
+        return @{ IsValid = $false; Message = "Error testing P12 file: $_" }
     }
 }
 
@@ -469,6 +664,12 @@ function Invoke-P12Extraction {
         [string]
         $CAFilePath,
 
+        [bool]
+        $TestMode,
+
+        [bool]
+        $VerifyCerts,
+
         [System.Windows.Forms.ProgressBar]
         $ProgressBar,
 
@@ -485,9 +686,49 @@ function Invoke-P12Extraction {
 
     $total = $Files.Count
     $processed = 0
+    $errorCount = 0
 
     if ($StatusLabel) {
         $StatusLabel.Text = "Processed {0} / {1} files" -f $processed, $total
+    }
+
+    # Verify OpenSSL path is valid
+    if (-not (Test-Path -LiteralPath $OpenSSLPath)) {
+        Add-Log -Message ("❌ OpenSSL executable not found at: {0}" -f $OpenSSLPath)
+        return
+    }
+
+    # Get and validate OpenSSL version
+    $opensslVersion = Get-OpenSSLVersion -OpenSSLPath $OpenSSLPath
+    if (-not $opensslVersion.IsValid) {
+        Add-Log -Message ("⚠️ Warning: OpenSSL version {0} detected. Version 3.0+ is recommended for best compatibility." -f $opensslVersion.Version)
+    }
+
+    # Try to find the ossl-modules folder for legacy provider support
+    $opensslDir = Split-Path -Parent $OpenSSLPath
+    $providerPath = $null
+
+    # Common locations for ossl-modules relative to openssl.exe
+    $providerSearchPaths = @(
+        (Join-Path $opensslDir "ossl-modules"),           # Same directory as exe
+        (Join-Path (Split-Path -Parent $opensslDir) "ossl-modules"),  # Parent directory
+        (Join-Path $opensslDir "..\lib\ossl-modules")    # Typical install structure (e.g., bin\..\lib\ossl-modules)
+    )
+
+    foreach ($path in $providerSearchPaths) {
+        $resolvedPath = [System.IO.Path]::GetFullPath($path)
+        if (Test-Path $resolvedPath) {
+            $legacyDll = Join-Path $resolvedPath "legacy.dll"
+            if (Test-Path $legacyDll) {
+                $providerPath = $resolvedPath
+                Add-Log -Message ("✓ Found legacy provider at: {0}" -f $legacyDll)
+                break
+            }
+        }
+    }
+
+    if (-not $providerPath) {
+        Add-Log -Message ("⚠️ Legacy provider (legacy.dll) not found. -legacy flag may not work for old P12 files.")
     }
 
     # Start transcript if enabled
@@ -504,6 +745,15 @@ function Invoke-P12Extraction {
             Write-Host "=== TRANSCRIPT STARTED ==="
             Write-Host "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             Write-Host "OpenSSL Path: $OpenSSLPath"
+            Write-Host "OpenSSL Version: $($opensslVersion.FullOutput)"
+            if (-not $opensslVersion.IsValid) {
+                Write-Host "OpenSSL Version Warning: Version 3.0+ is recommended (detected: $($opensslVersion.Version))"
+            }
+            if ($providerPath) {
+                Write-Host "Legacy Provider: Found at $providerPath"
+            } else {
+                Write-Host "Legacy Provider: Not found (legacy P12 files may fail)"
+            }
             Write-Host "Output Folder: $OutputFolder"
             Write-Host "Total Files: $total"
             Write-Host "Options: ExtractPEM=$ExtractPEM, ExtractCER=$ExtractCER, ExtractKey=$ExtractKey, EncryptKey=$EncryptKey, StripHeaders=$StripHeaders, AppendCA=$AppendCA"
@@ -528,6 +778,27 @@ function Invoke-P12Extraction {
         }
 
         $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file)
+
+        # Test Mode: Validate P12 files without extracting
+        if ($TestMode) {
+            $testResult = Test-P12File -FilePath $file.FullName -OpenSSLPath $OpenSSLPath -Password $Password -ProviderPath $providerPath
+
+            if ($testResult.IsValid) {
+                Add-Log -Message ("✓ {0} → {1}" -f $file.Name, $testResult.Message)
+            } else {
+                Add-Log -Message ("❌ {0} → {1}" -f $file.Name, $testResult.Message)
+                $errorCount++
+            }
+
+            $processed++
+            $ProgressBar.Value = $processed
+            if ($StatusLabel) {
+                $StatusLabel.Text = "Processed {0} / {1} files" -f $processed, $total
+            }
+
+            continue
+        }
+
         $pemPath = Join-Path $OutputFolder ("{0}.pem" -f $baseName)
         $cerPath = Join-Path $OutputFolder ("{0}.cer" -f $baseName)
         $keyPath = Join-Path $OutputFolder ("{0}.key" -f $baseName)
@@ -548,46 +819,77 @@ function Invoke-P12Extraction {
 
                 if ($script:TranscriptEnabled) {
                     Write-Host "Extracting PEM from: $($file.Name)"
-                    Write-Host "Command: openssl pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$pemPath`" -passin [HIDDEN]"
+                    Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$pemPath`" -passin [HIDDEN]"
                     $output = & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $pemPath -passin $passIn 2>&1
                     if ($output) { Write-Host $output }
                 } else {
                     & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $pemPath -passin $passIn 2>$null
                 }
-                
+
+                # Retry with -legacy flag if extraction failed (file doesn't exist or is empty)
+                $pemFailed = (-not (Test-Path $pemPath)) -or ((Get-Item $pemPath -ErrorAction SilentlyContinue).Length -eq 0)
+                if ($pemFailed) {
+                    # Remove empty file if it exists
+                    if (Test-Path $pemPath) {
+                        Remove-Item -LiteralPath $pemPath -Force -ErrorAction SilentlyContinue
+                    }
+
+                    if ($script:TranscriptEnabled) {
+                        Write-Host "PEM extraction failed, retrying with -legacy flag..."
+                        if ($providerPath) {
+                            Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$pemPath`" -passin [HIDDEN] -legacy -provider-path `"$providerPath`""
+                            $output = & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $pemPath -passin $passIn -legacy -provider-path $providerPath 2>&1
+                        } else {
+                            Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$pemPath`" -passin [HIDDEN] -legacy"
+                            $output = & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $pemPath -passin $passIn -legacy 2>&1
+                        }
+                        if ($output) { Write-Host $output }
+                    } else {
+                        if ($providerPath) {
+                            & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $pemPath -passin $passIn -legacy -provider-path $providerPath 2>$null
+                        } else {
+                            & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $pemPath -passin $passIn -legacy 2>$null
+                        }
+                    }
+
+                    if ((Test-Path $pemPath) -and ((Get-Item $pemPath).Length -gt 0)) {
+                        Add-Log -Message ("ℹ️ {0} → PEM extracted using -legacy flag" -f $file.Name)
+                    }
+                }
+
                 if (Test-Path $pemPath) {
                     if ($StripHeaders) {
                         if (-not (Limit-PemEnvelope -Path $pemPath)) {
                             Add-Log -Message ("⚠️ Failed to trim outside-PEM lines for {0} .pem" -f $file.Name)
                         }
                     }
-                    
+
                     if ($AppendCA -and $CAFilePath) {
                         if (Test-Path -LiteralPath $pemPath) {
                             try {
                                 $pemRaw = Get-Content -LiteralPath $pemPath -Raw -ErrorAction Stop
                                 $caRaw = Get-Content -LiteralPath $CAFilePath -Raw -ErrorAction Stop
-                                
+
                                 # Remove ALL trailing blank lines from PEM and ALL leading blank lines from CA
                                 $pemRaw = $pemRaw -replace '(\r?\n)*\s*\z', ''
                                 $caRaw = $caRaw -replace '^\s*(\r?\n)*', ''
-                                
+
                                 # Join with a single line break
                                 $combined = $pemRaw + "`r`n" + $caRaw
                                 Set-Content -LiteralPath $pemPath -Value $combined -Encoding ascii -NoNewline
                                 $successFlags += "PEM+CA"
-                            } 
+                            }
                             catch {
                                 Add-Log -Message ("❌ {0} → Failed to append CA to PEM: {1}" -f $file.Name, $_)
                                 $successFlags += "PEM"
                             }
-                        } 
+                        }
                         else {
                             Add-Log -Message ("❌ {0} → PEM not created, cannot append CA." -f $file.Name)
                         }
-                    } 
-                    else { 
-                        $successFlags += "PEM" 
+                    }
+                    else {
+                        $successFlags += "PEM"
                     }
                 }
             }
@@ -600,20 +902,51 @@ function Invoke-P12Extraction {
                 try {
                     if ($script:TranscriptEnabled) {
                         Write-Host "Extracting CER from: $($file.Name)"
-                        Write-Host "Command: openssl pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$tempPem`" -passin [HIDDEN]"
+                        Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$tempPem`" -passin [HIDDEN]"
                         $output = & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $tempPem -passin $passIn 2>&1
                         if ($output) { Write-Host $output }
                     } else {
                         & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $tempPem -passin $passIn 2>$null
                     }
 
+                    # Retry with -legacy flag if temp PEM extraction failed (file doesn't exist or is empty)
+                    $tempPemFailed = (-not (Test-Path -LiteralPath $tempPem)) -or ((Get-Item $tempPem -ErrorAction SilentlyContinue).Length -eq 0)
+                    if ($tempPemFailed) {
+                        # Remove empty file if it exists
+                        if (Test-Path -LiteralPath $tempPem) {
+                            Remove-Item -LiteralPath $tempPem -Force -ErrorAction SilentlyContinue
+                        }
+
+                        if ($script:TranscriptEnabled) {
+                            Write-Host "Temp PEM extraction failed, retrying with -legacy flag..."
+                            if ($providerPath) {
+                                Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$tempPem`" -passin [HIDDEN] -legacy -provider-path `"$providerPath`""
+                                $output = & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $tempPem -passin $passIn -legacy -provider-path $providerPath 2>&1
+                            } else {
+                                Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -clcerts -nokeys -out `"$tempPem`" -passin [HIDDEN] -legacy"
+                                $output = & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $tempPem -passin $passIn -legacy 2>&1
+                            }
+                            if ($output) { Write-Host $output }
+                        } else {
+                            if ($providerPath) {
+                                & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $tempPem -passin $passIn -legacy -provider-path $providerPath 2>$null
+                            } else {
+                                & $OpenSSLPath pkcs12 -in $file.FullName -clcerts -nokeys -out $tempPem -passin $passIn -legacy 2>$null
+                            }
+                        }
+                    }
+
                     if (Test-Path -LiteralPath $tempPem) {
                         if ($script:TranscriptEnabled) {
-                            Write-Host "Command: openssl x509 -in `"$tempPem`" -outform DER -out `"$cerPath`""
+                            Write-Host "Command: `"$OpenSSLPath`" x509 -in `"$tempPem`" -outform DER -out `"$cerPath`""
                             $output = & $OpenSSLPath x509 -in $tempPem -outform DER -out $cerPath 2>&1
                             if ($output) { Write-Host $output }
                         } else {
                             & $OpenSSLPath x509 -in $tempPem -outform DER -out $cerPath 2>$null
+                        }
+
+                        if (Test-Path $cerPath) {
+                            $successFlags += "CER"
                         }
                     }
                 }
@@ -621,10 +954,6 @@ function Invoke-P12Extraction {
                     if (Test-Path -LiteralPath $tempPem) {
                         Remove-Item -LiteralPath $tempPem -Force -ErrorAction SilentlyContinue
                     }
-                }
-                
-                if (Test-Path $cerPath) { 
-                    $successFlags += "CER" 
                 }
             }
 
@@ -635,11 +964,42 @@ function Invoke-P12Extraction {
 
                     if ($script:TranscriptEnabled) {
                         Write-Host "Extracting KEY (unencrypted) from: $($file.Name)"
-                        Write-Host "Command: openssl pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -nodes -passin [HIDDEN]"
+                        Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -nodes -passin [HIDDEN]"
                         $output = & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -nodes -passin $passIn 2>&1
                         if ($output) { Write-Host $output }
                     } else {
                         & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -nodes -passin $passIn 2>$null
+                    }
+
+                    # Retry with -legacy flag if extraction failed (file doesn't exist or is empty)
+                    $keyFailed = (-not (Test-Path $keyPath)) -or ((Get-Item $keyPath -ErrorAction SilentlyContinue).Length -eq 0)
+                    if ($keyFailed) {
+                        # Remove empty file if it exists
+                        if (Test-Path $keyPath) {
+                            Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+                        }
+
+                        if ($script:TranscriptEnabled) {
+                            Write-Host "KEY extraction failed, retrying with -legacy flag..."
+                            if ($providerPath) {
+                                Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -nodes -passin [HIDDEN] -legacy -provider-path `"$providerPath`""
+                                $output = & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -nodes -passin $passIn -legacy -provider-path $providerPath 2>&1
+                            } else {
+                                Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -nodes -passin [HIDDEN] -legacy"
+                                $output = & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -nodes -passin $passIn -legacy 2>&1
+                            }
+                            if ($output) { Write-Host $output }
+                        } else {
+                            if ($providerPath) {
+                                & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -nodes -passin $passIn -legacy -provider-path $providerPath 2>$null
+                            } else {
+                                & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -nodes -passin $passIn -legacy 2>$null
+                            }
+                        }
+
+                        if ((Test-Path $keyPath) -and ((Get-Item $keyPath).Length -gt 0)) {
+                            Add-Log -Message ("ℹ️ {0} → KEY extracted using -legacy flag" -f $file.Name)
+                        }
                     }
                 }
                 else {
@@ -654,23 +1014,87 @@ function Invoke-P12Extraction {
 
                     if ($script:TranscriptEnabled) {
                         Write-Host "Extracting KEY (encrypted) from: $($file.Name)"
-                        Write-Host "Command: openssl pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -passin [HIDDEN] -passout [HIDDEN]"
+                        Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -passin [HIDDEN] -passout [HIDDEN]"
                         $output = & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -passin $passIn -passout $passOut 2>&1
                         if ($output) { Write-Host $output }
                     } else {
                         & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -passin $passIn -passout $passOut 2>$null
                     }
+
+                    # Retry with -legacy flag if extraction failed (file doesn't exist or is empty)
+                    $keyFailed = (-not (Test-Path $keyPath)) -or ((Get-Item $keyPath -ErrorAction SilentlyContinue).Length -eq 0)
+                    if ($keyFailed) {
+                        # Remove empty file if it exists
+                        if (Test-Path $keyPath) {
+                            Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+                        }
+
+                        if ($script:TranscriptEnabled) {
+                            Write-Host "KEY extraction failed, retrying with -legacy flag..."
+                            if ($providerPath) {
+                                Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -passin [HIDDEN] -passout [HIDDEN] -legacy -provider-path `"$providerPath`""
+                                $output = & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -passin $passIn -passout $passOut -legacy -provider-path $providerPath 2>&1
+                            } else {
+                                Write-Host "Command: `"$OpenSSLPath`" pkcs12 -in `"$($file.FullName)`" -nocerts -out `"$keyPath`" -passin [HIDDEN] -passout [HIDDEN] -legacy"
+                                $output = & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -passin $passIn -passout $passOut -legacy 2>&1
+                            }
+                            if ($output) { Write-Host $output }
+                        } else {
+                            if ($providerPath) {
+                                & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -passin $passIn -passout $passOut -legacy -provider-path $providerPath 2>$null
+                            } else {
+                                & $OpenSSLPath pkcs12 -in $file.FullName -nocerts -out $keyPath -passin $passIn -passout $passOut -legacy 2>$null
+                            }
+                        }
+
+                        if ((Test-Path $keyPath) -and ((Get-Item $keyPath).Length -gt 0)) {
+                            Add-Log -Message ("ℹ️ {0} → KEY extracted using -legacy flag" -f $file.Name)
+                        }
+                    }
                 }
-                
+
                 if (Test-Path $keyPath) {
                     if ($StripHeaders) {
                         if (-not (Limit-PemEnvelope -Path $keyPath)) {
                             Add-Log -Message ("⚠️ Failed to trim outside-PEM lines for {0} .key" -f $file.Name)
                         }
                     }
-                    
+
                     $keyStatus = if ($EncryptKey) { "(enc)" } else { "(noenc)" }
                     $successFlags += "KEY{0}" -f $keyStatus
+                }
+            }
+
+            # Verify extracted certificates if requested
+            if ($VerifyCerts -and $successFlags.Count -gt 0) {
+                $verificationResults = @()
+
+                if ((Test-Path $pemPath) -and ($successFlags -match "PEM")) {
+                    if (Test-CertificateFile -FilePath $pemPath -OpenSSLPath $OpenSSLPath -FileType 'PEM') {
+                        $verificationResults += "PEM: ✓"
+                    } else {
+                        $verificationResults += "PEM: ✗"
+                    }
+                }
+
+                if ((Test-Path $cerPath) -and ($successFlags -match "CER")) {
+                    if (Test-CertificateFile -FilePath $cerPath -OpenSSLPath $OpenSSLPath -FileType 'CER') {
+                        $verificationResults += "CER: ✓"
+                    } else {
+                        $verificationResults += "CER: ✗"
+                    }
+                }
+
+                if ((Test-Path $keyPath) -and ($successFlags -match "KEY")) {
+                    if (Test-CertificateFile -FilePath $keyPath -OpenSSLPath $OpenSSLPath -FileType 'KEY') {
+                        $verificationResults += "KEY: ✓"
+                    } else {
+                        $verificationResults += "KEY: ✗"
+                    }
+                }
+
+                if ($verificationResults.Count -gt 0) {
+                    Add-Log -Message ("   Verification: {0}" -f ($verificationResults -join ', '))
                 }
             }
 
@@ -678,13 +1102,14 @@ function Invoke-P12Extraction {
                 if ($successFlags -contains "PEM+CA" -and $CAFilePath) {
                     $caFileName = Split-Path -Path $CAFilePath -Leaf
                     Add-Log -Message ("✅ {0} → {1} (CA: {2})" -f $file.Name, ($successFlags -join ', '), $caFileName)
-                } 
+                }
                 else {
                     Add-Log -Message ("✅ {0} → {1}" -f $file.Name, ($successFlags -join ', '))
                 }
-            } 
+            }
             else {
                 Add-Log -Message ("❌ {0} → No outputs produced" -f $file.Name)
+                $errorCount++
             }
         }
         catch {
@@ -694,6 +1119,7 @@ function Invoke-P12Extraction {
                 Write-Host "Error details: $($_ | Out-String)"
             }
             Add-Log -Message ("❌ {0} → Error: {1}" -f $file.Name, $errorMsg)
+            $errorCount++
         }
 
         $processed++
@@ -716,8 +1142,17 @@ function Invoke-P12Extraction {
             Write-Host "=== TRANSCRIPT ENDED ==="
             Write-Host "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             Write-Host "Total files processed: $processed / $total"
+            Write-Host "Errors encountered: $errorCount"
             Write-Host "Stopped: $(if ($script:StopRequested) { 'Yes (user requested)' } else { 'No (completed)' })"
             Stop-Transcript -ErrorAction Stop
+
+            # Auto-open transcript if errors occurred and option is enabled
+            if ($script:chkAutoOpenTranscript.Checked -and $errorCount -gt 0 -and $script:TranscriptPath) {
+                if (Test-Path -LiteralPath $script:TranscriptPath) {
+                    Add-Log -Message ("📄 Opening transcript due to errors: {0}" -f $script:TranscriptPath)
+                    Start-Process notepad.exe -ArgumentList "`"$($script:TranscriptPath)`""
+                }
+            }
         }
         catch {
             Add-Log -Message ("⚠️ Failed to stop transcript: {0}" -f $_)
@@ -930,6 +1365,23 @@ $script:chkVerboseTranscript.Checked = $false
 $script:chkVerboseTranscript.Anchor = "Top, Left"
 $form.Controls.Add($script:chkVerboseTranscript)
 
+# Advanced options row 2
+$script:chkVerifyCerts = New-Object System.Windows.Forms.CheckBox
+$script:chkVerifyCerts.Location = New-Object System.Drawing.Point(440, 240)
+$script:chkVerifyCerts.Size = New-Object System.Drawing.Size(200, 20)
+$script:chkVerifyCerts.Text = "Verify extracted certificates"
+$script:chkVerifyCerts.Checked = $false
+$script:chkVerifyCerts.Anchor = "Top, Left"
+$form.Controls.Add($script:chkVerifyCerts)
+
+$script:chkAutoOpenTranscript = New-Object System.Windows.Forms.CheckBox
+$script:chkAutoOpenTranscript.Location = New-Object System.Drawing.Point(20, 265)
+$script:chkAutoOpenTranscript.Size = New-Object System.Drawing.Size(250, 20)
+$script:chkAutoOpenTranscript.Text = "Auto-open transcript when errors occur"
+$script:chkAutoOpenTranscript.Checked = $false
+$script:chkAutoOpenTranscript.Anchor = "Top, Left"
+$form.Controls.Add($script:chkAutoOpenTranscript)
+
 # Files list
 $script:listP12Files = New-Object System.Windows.Forms.ListBox
 $script:listP12Files.MultiColumn = $false
@@ -937,8 +1389,8 @@ $script:listP12Files.HorizontalScrollbar = $true
 $script:listP12Files.ScrollAlwaysVisible = $true
 $script:listP12Files.IntegralHeight = $false
 $script:listP12Files.DrawMode = 'Normal'
-$script:listP12Files.Location = New-Object System.Drawing.Point(20, 270)
-$script:listP12Files.Size = New-Object System.Drawing.Size(740, 280)
+$script:listP12Files.Location = New-Object System.Drawing.Point(20, 295)
+$script:listP12Files.Size = New-Object System.Drawing.Size(740, 255)
 $script:listP12Files.Anchor = "Top, Left, Right, Bottom"
 $form.Controls.Add($script:listP12Files)
 
@@ -1023,6 +1475,13 @@ $script:btnStop.Location = New-Object System.Drawing.Point(735, 15)
 $script:btnStop.Text = "Stop"
 $script:btnStop.Enabled = $false
 $script:panelBottom.Controls.Add($script:btnStop)
+
+$script:btnTest = New-Object System.Windows.Forms.Button
+$script:btnTest.Size = New-Object System.Drawing.Size(120, 36)
+$script:btnTest.Location = New-Object System.Drawing.Point(820, 15)
+$script:btnTest.Text = "Test P12 Files"
+$script:btnTest.Enabled = $false
+$script:panelBottom.Controls.Add($script:btnTest)
 
 $script:btnExit = New-Object System.Windows.Forms.Button
 $script:btnExit.Size = New-Object System.Drawing.Size(90, 36)
@@ -1338,7 +1797,8 @@ $script:btnCheckOpenSSL.Add_Click({
         $script:lblOpenSSL.Text = "✅ OpenSSL found at: {0}" -f $found
         $script:btnTestOpenSSL.Enabled = $true
         $script:btnStart.Enabled = $true
-    } 
+        $script:btnTest.Enabled = $true
+    }
     else {
         $script:lblOpenSSL.ForeColor = if ($script:chkDark.Checked) { 
             $script:DarkTheme.BadColor 
@@ -1358,6 +1818,7 @@ $script:btnCheckOpenSSL.Add_Click({
             $script:lblOpenSSL.Text = "✅ Using manual OpenSSL path: {0}" -f $manual
             $script:btnTestOpenSSL.Enabled = $true
             $script:btnStart.Enabled = $true
+            $script:btnTest.Enabled = $true
         }
     }
 })
@@ -1421,13 +1882,35 @@ $script:btnStart.Add_Click({
         ) | Out-Null
         return
     }
-    
+
+    # Validate CA file is valid PEM format
+    if ($script:chkAppendCA.Checked -and -not (Test-PEMFile -Path $script:CAFilePath)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "The selected CA file does not appear to be in valid PEM format.`n`nPEM files must contain '-----BEGIN' and '-----END' markers.",
+            "Invalid CA File Format",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
     if ($script:chkAppendCA.Checked -and -not $script:chkExtractPEM.Checked) {
         [System.Windows.Forms.MessageBox]::Show(
             "To append the CA chain, 'Extract PEM' must be selected.",
             "Enable Extract PEM",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+        return
+    }
+
+    # Validate that at least one extraction format is selected
+    if (-not ($script:chkExtractPEM.Checked -or $script:chkExtractCER.Checked -or $script:chkExtractKey.Checked)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Please select at least one extraction format (PEM, CER, or KEY).",
+            "No Format Selected",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
         ) | Out-Null
         return
     }
@@ -1597,6 +2080,8 @@ $script:btnStart.Add_Click({
         -ExtractKey $script:chkExtractKey.Checked `
         -AppendCA $script:chkAppendCA.Checked `
         -CAFilePath $script:CAFilePath `
+        -TestMode $false `
+        -VerifyCerts $script:chkVerifyCerts.Checked `
         -ProgressBar $script:ProgressBar `
         -LogBox $script:LogBox `
         -StatusLabel $script:statusLabel
@@ -1627,6 +2112,126 @@ $script:btnStart.Add_Click({
 # Stop extraction
 $script:btnStop.Add_Click({
     $script:StopRequested = $true
+})
+
+# Test P12 Files button
+$script:btnTest.Add_Click({
+    if (-not $script:OpenSSLPath) {
+        return
+    }
+
+    $folder = $script:txtFolder.Text.Trim()
+    $password = $script:txtPwd.Text
+
+    if (-not $password) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Please enter the P12 password first.",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $folder)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Please select a valid folder first.",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
+    $outputFolder = Join-Path $folder "Extracted"
+
+    # Create output folder if it doesn't exist (for transcript)
+    if (-not (Test-Path -LiteralPath $outputFolder)) {
+        New-Item -ItemType Directory -Path $outputFolder | Out-Null
+    }
+
+    # Setup verbose transcript logging
+    if ($script:chkVerboseTranscript.Checked) {
+        $script:TranscriptEnabled = $true
+        $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+        $script:TranscriptPath = Join-Path $outputFolder ("Transcript_Test_{0}.log" -f $stamp)
+
+        try {
+            New-Item -ItemType File -Path $script:TranscriptPath -Force | Out-Null
+            Add-Log -Message ("📝 Verbose transcript enabled: {0}" -f $script:TranscriptPath)
+        }
+        catch {
+            $script:TranscriptEnabled = $false
+            $script:TranscriptPath = $null
+            Add-Log -Message ("⚠️ Failed to create transcript file: {0}" -f $_)
+        }
+    }
+    else {
+        $script:TranscriptEnabled = $false
+        $script:TranscriptPath = $null
+    }
+
+    $files = @(Get-P12Files -FolderPath $folder)
+    Add-Log -Message ("🧪 Test Mode: folder = {0}" -f $folder)
+    Add-Log -Message ("🔎 Detected {0} P12/PFX file(s) to test" -f $files.Count)
+
+    if ($files.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No .p12/.pfx files found.",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
+    # UI state: running
+    $script:StopRequested = $false
+    $script:btnStart.Enabled = $false
+    $script:btnTest.Enabled = $false
+    $script:btnStop.Enabled = $true
+    $script:btnOpenFolder.Enabled = $false
+    $script:lblRunStatus.Text = "Testing..."
+    $script:lblRunStatus.ForeColor = if ($script:chkDark.Checked) {
+        $script:DarkTheme.GoodColor
+    } else {
+        $script:LightTheme.GoodColor
+    }
+
+    $oldTitle = $form.Text
+    $form.Text = "[Testing] P12/PFX Certificate Toolkit (GUI)"
+
+    if ($script:statusLabel) {
+        $script:statusLabel.Text = "Tested 0 / {0} files" -f $files.Count
+    }
+
+    # Call extraction function in Test Mode (no actual extraction)
+    Invoke-P12Extraction `
+        -OpenSSLPath $script:OpenSSLPath `
+        -Files $files `
+        -OutputFolder $outputFolder `
+        -Password $password `
+        -EncryptKey $false `
+        -StripHeaders $false `
+        -ExtractPEM $false `
+        -ExtractCER $false `
+        -ExtractKey $false `
+        -AppendCA $false `
+        -CAFilePath $null `
+        -TestMode $true `
+        -VerifyCerts $false `
+        -ProgressBar $script:ProgressBar `
+        -LogBox $script:LogBox `
+        -StatusLabel $script:statusLabel
+
+    # UI state: finished/cancelled
+    $script:btnStop.Enabled = $false
+    $script:btnStart.Enabled = $true
+    $script:btnTest.Enabled = $true
+    $script:lblRunStatus.Text = ""
+    $form.Text = $oldTitle
+
+    Add-Log -Message ("✅ Test Mode completed")
 })
 
 # Open extracted folder
