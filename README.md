@@ -50,7 +50,7 @@ A comprehensive PowerShell GUI application for extracting and managing certifica
 
 Simply run the original script directly:
 ```powershell
-.\P12_PFX Certficate Toolkit_GUI Rev2.ps1
+.\P12_PFX Certficate Toolkit_GUI.ps1
 ```
 
 ## Usage
@@ -233,8 +233,8 @@ This project is provided as-is for personal use. See repository for license deta
 
 ## Author
 
-**FrznDad**
-GitHub: [Personal-Scripts](https://github.com/FrznDad/Personal-Scripts)
+Matthew Blakeslee-Hisel
+GitHub: [Personal-Scripts](https://github.com/frznto/Powershell-Public)
 
 ## Version History
 
