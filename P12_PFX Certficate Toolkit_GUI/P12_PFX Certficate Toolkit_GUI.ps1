@@ -659,6 +659,9 @@ function Invoke-P12Extraction {
         $ExtractKey,
 
         [bool]
+        $CombineKeyWithPEM,
+
+        [bool]
         $AppendCA,
 
         [string]
@@ -756,7 +759,7 @@ function Invoke-P12Extraction {
             }
             Write-Host "Output Folder: $OutputFolder"
             Write-Host "Total Files: $total"
-            Write-Host "Options: ExtractPEM=$ExtractPEM, ExtractCER=$ExtractCER, ExtractKey=$ExtractKey, EncryptKey=$EncryptKey, StripHeaders=$StripHeaders, AppendCA=$AppendCA"
+            Write-Host "Options: ExtractPEM=$ExtractPEM, ExtractCER=$ExtractCER, ExtractKey=$ExtractKey, EncryptKey=$EncryptKey, StripHeaders=$StripHeaders, CombineKeyWithPEM=$CombineKeyWithPEM, AppendCA=$AppendCA"
             if ($AppendCA -and $CAFilePath) {
                 Write-Host "CA File: $CAFilePath"
             }
@@ -811,6 +814,7 @@ function Invoke-P12Extraction {
         }
 
         $successFlags = @()
+        $pemExtracted = $false
 
         try {
             # CERT as PEM (text)
@@ -864,33 +868,7 @@ function Invoke-P12Extraction {
                         }
                     }
 
-                    if ($AppendCA -and $CAFilePath) {
-                        if (Test-Path -LiteralPath $pemPath) {
-                            try {
-                                $pemRaw = Get-Content -LiteralPath $pemPath -Raw -ErrorAction Stop
-                                $caRaw = Get-Content -LiteralPath $CAFilePath -Raw -ErrorAction Stop
-
-                                # Remove ALL trailing blank lines from PEM and ALL leading blank lines from CA
-                                $pemRaw = $pemRaw -replace '(\r?\n)*\s*\z', ''
-                                $caRaw = $caRaw -replace '^\s*(\r?\n)*', ''
-
-                                # Join with a single line break
-                                $combined = $pemRaw + "`r`n" + $caRaw
-                                Set-Content -LiteralPath $pemPath -Value $combined -Encoding ascii -NoNewline
-                                $successFlags += "PEM+CA"
-                            }
-                            catch {
-                                Add-Log -Message ("❌ {0} → Failed to append CA to PEM: {1}" -f $file.Name, $_)
-                                $successFlags += "PEM"
-                            }
-                        }
-                        else {
-                            Add-Log -Message ("❌ {0} → PEM not created, cannot append CA." -f $file.Name)
-                        }
-                    }
-                    else {
-                        $successFlags += "PEM"
-                    }
+                    $pemExtracted = $true
                 }
             }
 
@@ -1065,6 +1043,52 @@ function Invoke-P12Extraction {
                 }
             }
 
+            # PEM post-processing: combine key and/or append CA
+            if ($pemExtracted -and (Test-Path -LiteralPath $pemPath)) {
+
+                # 1) Append private key into PEM (after host cert, before CA)
+                if ($CombineKeyWithPEM -and $ExtractKey -and (Test-Path -LiteralPath $keyPath)) {
+                    try {
+                        $pemRaw = Get-Content -LiteralPath $pemPath -Raw -ErrorAction Stop
+                        $keyRaw = Get-Content -LiteralPath $keyPath -Raw -ErrorAction Stop
+
+                        $pemRaw = $pemRaw -replace '(\r?\n)*\s*\z', ''
+                        $keyRaw = $keyRaw -replace '^\s*(\r?\n)*', ''
+
+                        $combined = $pemRaw + "`r`n" + $keyRaw
+                        Set-Content -LiteralPath $pemPath -Value $combined -Encoding ascii -NoNewline
+                        Add-Log -Message ("ℹ️ {0} → Private key appended to PEM" -f $file.Name)
+                    }
+                    catch {
+                        Add-Log -Message ("❌ {0} → Failed to append key to PEM: {1}" -f $file.Name, $_)
+                    }
+                }
+
+                # 2) Append IA/Root CA chain
+                if ($AppendCA -and $CAFilePath) {
+                    try {
+                        $pemRaw = Get-Content -LiteralPath $pemPath -Raw -ErrorAction Stop
+                        $caRaw  = Get-Content -LiteralPath $CAFilePath -Raw -ErrorAction Stop
+
+                        # Remove ALL trailing blank lines from PEM and ALL leading blank lines from CA
+                        $pemRaw = $pemRaw -replace '(\r?\n)*\s*\z', ''
+                        $caRaw  = $caRaw  -replace '^\s*(\r?\n)*', ''
+
+                        # Join with a single line break
+                        $combined = $pemRaw + "`r`n" + $caRaw
+                        Set-Content -LiteralPath $pemPath -Value $combined -Encoding ascii -NoNewline
+                        $successFlags += "PEM+CA"
+                    }
+                    catch {
+                        Add-Log -Message ("❌ {0} → Failed to append CA to PEM: {1}" -f $file.Name, $_)
+                        $successFlags += "PEM"
+                    }
+                }
+                else {
+                    $successFlags += "PEM"
+                }
+            }
+
             # Verify extracted certificates if requested
             if ($VerifyCerts -and $successFlags.Count -gt 0) {
                 $verificationResults = @()
@@ -1197,12 +1221,12 @@ function Start-ButtonFlash {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "P12/PFX Certificate Toolkit (GUI)"
-$form.Size = New-Object System.Drawing.Size(800, 860)
+$form.Size = New-Object System.Drawing.Size(800, 885)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = 'Sizable'
 $form.AutoScroll = $true
 $form.VerticalScroll.Visible = $true
-$form.MinimumSize = New-Object System.Drawing.Size(800, 700)
+$form.MinimumSize = New-Object System.Drawing.Size(800, 725)
 
 #region Top Controls (Scrollable Content)
 
@@ -1309,23 +1333,31 @@ $script:txtKeyPassword.Enabled = $false
 $script:txtKeyPassword.Anchor = "Top, Left"
 $form.Controls.Add($script:txtKeyPassword)
 
+# Append private key to PEM option
+$script:chkCombineKeyWithPEM = New-Object System.Windows.Forms.CheckBox
+$script:chkCombineKeyWithPEM.Location = New-Object System.Drawing.Point(20, 190)
+$script:chkCombineKeyWithPEM.Size = New-Object System.Drawing.Size(320, 20)
+$script:chkCombineKeyWithPEM.Text = "Append Private Key to PEM"
+$script:chkCombineKeyWithPEM.Checked = $false
+$form.Controls.Add($script:chkCombineKeyWithPEM)
+
 # CA chain append (PEM only)
 $script:chkAppendCA = New-Object System.Windows.Forms.CheckBox
-$script:chkAppendCA.Location = New-Object System.Drawing.Point(20, 190)
+$script:chkAppendCA.Location = New-Object System.Drawing.Point(20, 215)
 $script:chkAppendCA.Size = New-Object System.Drawing.Size(320, 20)
 $script:chkAppendCA.Text = "Append IA/Root CA information to PEM files"
 $script:chkAppendCA.Checked = $false
 $form.Controls.Add($script:chkAppendCA)
 
 $script:btnSelectCA = New-Object System.Windows.Forms.Button
-$script:btnSelectCA.Location = New-Object System.Drawing.Point(350, 188)
+$script:btnSelectCA.Location = New-Object System.Drawing.Point(350, 213)
 $script:btnSelectCA.Size = New-Object System.Drawing.Size(130, 24)
 $script:btnSelectCA.Text = "Select CA File..."
 $script:btnSelectCA.Enabled = $false
 $form.Controls.Add($script:btnSelectCA)
 
 $script:lblCAPath = New-Object System.Windows.Forms.Label
-$script:lblCAPath.Location = New-Object System.Drawing.Point(490, 190)
+$script:lblCAPath.Location = New-Object System.Drawing.Point(490, 215)
 $script:lblCAPath.Size = New-Object System.Drawing.Size(270, 20)
 $script:lblCAPath.ForeColor = 'Gray'
 $script:lblCAPath.Text = ""
@@ -1335,21 +1367,21 @@ $form.Controls.Add($script:lblCAPath)
 
 # Logging options
 $script:chkLogToFile = New-Object System.Windows.Forms.CheckBox
-$script:chkLogToFile.Location = New-Object System.Drawing.Point(20, 215)
+$script:chkLogToFile.Location = New-Object System.Drawing.Point(20, 240)
 $script:chkLogToFile.Size = New-Object System.Drawing.Size(140, 20)
 $script:chkLogToFile.Text = "Write to log file"
 $script:chkLogToFile.Checked = $false
 $form.Controls.Add($script:chkLogToFile)
 
 $script:btnBrowseLog = New-Object System.Windows.Forms.Button
-$script:btnBrowseLog.Location = New-Object System.Drawing.Point(160, 213)
+$script:btnBrowseLog.Location = New-Object System.Drawing.Point(160, 238)
 $script:btnBrowseLog.Size = New-Object System.Drawing.Size(130, 24)
 $script:btnBrowseLog.Text = "Select Log File..."
 $script:btnBrowseLog.Enabled = $false
 $form.Controls.Add($script:btnBrowseLog)
 
 $script:lblLogPath = New-Object System.Windows.Forms.Label
-$script:lblLogPath.Location = New-Object System.Drawing.Point(300, 215)
+$script:lblLogPath.Location = New-Object System.Drawing.Point(300, 240)
 $script:lblLogPath.Size = New-Object System.Drawing.Size(460, 20)
 $script:lblLogPath.ForeColor = 'Gray'
 $script:lblLogPath.AutoEllipsis = $true
@@ -1358,7 +1390,7 @@ $form.Controls.Add($script:lblLogPath)
 
 # Verbose transcript logging option
 $script:chkVerboseTranscript = New-Object System.Windows.Forms.CheckBox
-$script:chkVerboseTranscript.Location = New-Object System.Drawing.Point(20, 240)
+$script:chkVerboseTranscript.Location = New-Object System.Drawing.Point(20, 265)
 $script:chkVerboseTranscript.Size = New-Object System.Drawing.Size(400, 20)
 $script:chkVerboseTranscript.Text = "Enable verbose transcript (captures all commands)"
 $script:chkVerboseTranscript.Checked = $false
@@ -1367,7 +1399,7 @@ $form.Controls.Add($script:chkVerboseTranscript)
 
 # Advanced options row 2
 $script:chkVerifyCerts = New-Object System.Windows.Forms.CheckBox
-$script:chkVerifyCerts.Location = New-Object System.Drawing.Point(440, 240)
+$script:chkVerifyCerts.Location = New-Object System.Drawing.Point(440, 265)
 $script:chkVerifyCerts.Size = New-Object System.Drawing.Size(200, 20)
 $script:chkVerifyCerts.Text = "Verify extracted certificates"
 $script:chkVerifyCerts.Checked = $false
@@ -1375,7 +1407,7 @@ $script:chkVerifyCerts.Anchor = "Top, Left"
 $form.Controls.Add($script:chkVerifyCerts)
 
 $script:chkAutoOpenTranscript = New-Object System.Windows.Forms.CheckBox
-$script:chkAutoOpenTranscript.Location = New-Object System.Drawing.Point(20, 265)
+$script:chkAutoOpenTranscript.Location = New-Object System.Drawing.Point(20, 290)
 $script:chkAutoOpenTranscript.Size = New-Object System.Drawing.Size(250, 20)
 $script:chkAutoOpenTranscript.Text = "Auto-open transcript when errors occur"
 $script:chkAutoOpenTranscript.Checked = $false
@@ -1389,7 +1421,7 @@ $script:listP12Files.HorizontalScrollbar = $true
 $script:listP12Files.ScrollAlwaysVisible = $true
 $script:listP12Files.IntegralHeight = $false
 $script:listP12Files.DrawMode = 'Normal'
-$script:listP12Files.Location = New-Object System.Drawing.Point(20, 295)
+$script:listP12Files.Location = New-Object System.Drawing.Point(20, 320)
 $script:listP12Files.Size = New-Object System.Drawing.Size(740, 255)
 $script:listP12Files.Anchor = "Top, Left, Right, Bottom"
 $form.Controls.Add($script:listP12Files)
@@ -2078,6 +2110,7 @@ $script:btnStart.Add_Click({
         -ExtractPEM $script:chkExtractPEM.Checked `
         -ExtractCER $script:chkExtractCER.Checked `
         -ExtractKey $script:chkExtractKey.Checked `
+        -CombineKeyWithPEM $script:chkCombineKeyWithPEM.Checked `
         -AppendCA $script:chkAppendCA.Checked `
         -CAFilePath $script:CAFilePath `
         -TestMode $false `
@@ -2216,6 +2249,7 @@ $script:btnTest.Add_Click({
         -ExtractPEM $false `
         -ExtractCER $false `
         -ExtractKey $false `
+        -CombineKeyWithPEM $false `
         -AppendCA $false `
         -CAFilePath $null `
         -TestMode $true `

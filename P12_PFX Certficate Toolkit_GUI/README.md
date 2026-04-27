@@ -5,16 +5,20 @@ A comprehensive PowerShell GUI application for extracting and managing certifica
 ## Features
 
 - **Multiple Output Formats**: Extract PEM, CER, and KEY files
-- **Key Encryption**: Optional key encryption with custom password support
+- **Key Encryption**: Optional key encryption with custom password support; key password auto-populates from P12 password
 - **CA Chain Management**: Append CA certificate chains to PEM files
+- **Append Private Key to PEM**: Optionally combine the private key directly into the PEM file
 - **Dark Mode**: User-friendly dark and light theme support
 - **Batch Processing**: Process multiple P12/PFX files with progress tracking
-- **Verbose Logging**: Detailed transcript logging for troubleshooting
+- **Verbose Logging**: Timestamped transcript logging for troubleshooting; separate log files for extraction and test runs
 - **Test Mode**: Validate P12 files without extracting
-- **Certificate Verification**: Verify extracted certificates using OpenSSL
-- **Legacy Support**: Automatic detection and support for legacy P12/PFX formats
-- **Portable OpenSSL**: Auto-detection of legacy provider in portable OpenSSL installations
+- **Certificate Verification**: Verify extracted certificates using OpenSSL with inline per-file results
+- **Legacy Support**: Automatic detection and support for legacy P12/PFX formats with enhanced retry logic
+- **Portable OpenSSL**: Auto-detection of legacy provider in portable OpenSSL installations (checks three locations)
 - **Version Validation**: OpenSSL version checking with compatibility warnings
+- **Output Folder Conflict Handling**: Prompts to overwrite, create a timestamped folder, or cancel when the output folder already exists
+- **Open Extracted Folder**: Button appears after extraction completes to open the output folder directly
+- **Responsive UI**: Auto-scaling button layout and form title updates during operations
 
 ## Requirements
 
@@ -75,7 +79,8 @@ Start-P12CertificateToolkit -OpenSSLPath "C:\OpenSSL\bin\openssl.exe"
 3. **Enter Password**: Provide the P12/PFX file password
 4. **Configure Options**:
    - Select extraction formats (PEM, CER, KEY)
-   - Enable key encryption if desired
+   - Enable key encryption if desired (key password auto-populates from P12 password)
+   - Append private key to PEM file (optional)
    - Strip headers from output files (optional)
    - Append CA chain to PEM files (optional)
    - Enable verbose transcript logging
@@ -83,6 +88,7 @@ Start-P12CertificateToolkit -OpenSSLPath "C:\OpenSSL\bin\openssl.exe"
    - Auto-open transcript on errors
 5. **Start Extraction** or **Test P12 Files**: Begin processing or validation
 6. **Monitor Progress**: View real-time progress and detailed logs
+7. **Open Extracted Folder**: Click the button that appears after extraction to open the output folder
 
 ### Test Mode
 
@@ -116,13 +122,15 @@ Verification results appear in the log with ✓ (success) or ✗ (failure) indic
 
 ### Advanced Options
 
-- **Encrypt Private Key**: Re-encrypt extracted keys with a different password
+- **Encrypt Private Key**: Re-encrypt extracted keys with a different password (auto-populates with P12 password)
+- **Append Private Key to PEM**: Combine the private key into the PEM file before any CA chain
 - **Strip Headers**: Remove extra headers/footers from output files (keep only BEGIN/END markers)
 - **Append CA Chain**: Append CA certificate chain to PEM certificate files
 - **Dark Mode**: Toggle between light and dark UI themes
 - **Log to File**: Save extraction log to a text file
-- **Verbose Transcript**: Create detailed transcript of all OpenSSL operations
+- **Verbose Transcript**: Create timestamped transcript of all OpenSSL operations (separate files for extraction and test runs)
 - **Auto-open Transcript**: Automatically open transcript in Notepad when errors occur
+- **Output Folder Conflict**: When an `Extracted` folder already exists, choose to overwrite it, create a new timestamped folder (`Extracted_yyyy-MM-dd_HH-mm-ss`), or cancel
 
 ## OpenSSL Compatibility
 
@@ -143,7 +151,7 @@ For old P12/PFX files that require the legacy provider:
 
 2. If detected, `-provider-path` is automatically added to OpenSSL commands
 
-3. The toolkit retries failed extractions with `-legacy` flag automatically
+3. The toolkit retries failed extractions with `-legacy` flag automatically, with status messages indicating when legacy mode was used
 
 ### Portable OpenSSL
 
@@ -238,15 +246,21 @@ GitHub: [Personal-Scripts](https://github.com/frznto/Powershell-Public)
 
 ## Version History
 
-### Version 2.0.0 (2025)
+### Version 2.0.0 (11/3/2025)
 - Converted standalone script to PowerShell module
 - Added proper module structure with manifest
 - Improved code organization
 - Enhanced error handling and validation
-- OpenSSL 3.x legacy provider auto-detection
-- Certificate verification functionality
-- Test Mode for P12 file validation
+- OpenSSL 3.x legacy provider auto-detection (checks three locations)
+- Certificate verification with inline per-file results
+- Test Mode for P12 file validation with separate transcript logs
 - Auto-open transcript on errors
+- Append private key to PEM option
+- Key password auto-populates from P12 password
+- Output folder conflict handling (overwrite / timestamped / cancel)
+- Open Extracted Folder button after extraction completes
+- Responsive UI layout with auto-scaling buttons
+- Form title reflects current operation state ([Running] / [Testing])
 - Comprehensive documentation
 
 ### Version 1.0 (Initial Release)
